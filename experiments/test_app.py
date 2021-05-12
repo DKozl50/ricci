@@ -1,11 +1,12 @@
 import sys
 import networkx as nx
+import numpy as np
 from ricci_calculators import ollivier
 from PyQt5.QtWidgets import QMainWindow, QApplication, \
-                            QPushButton, QVBoxLayout, QHBoxLayout, QWidget
-from PyQt5.QtGui import QPalette, QPainter, QBrush, QColor
-# delete me
-from random import randint
+    QPushButton, QVBoxLayout, QHBoxLayout, QWidget
+from PyQt5.QtGui import QPalette, QPainter, QBrush, QPen, \
+    QColor, QWheelEvent
+from PyQt5.QtCore import QPointF
 
 
 class GraphView(QWidget):
@@ -14,20 +15,84 @@ class GraphView(QWidget):
         self.setBackgroundRole(QPalette.Base)
         self.setAutoFillBackground(True)
 
+        self.scale_per_angle = .005
+        self.scale = 1.
+        self.max_scale = 5.
+        self.min_scale = 0.2
+
+        self.vertex_color = QColor(255, 69, 0)  # orangered
+        self.vertex_radius = 20
+        self.edge_color = QColor(0, 0, 255)  # black
+        self.edge_size = 3
+
+        self.graph = [
+            [1, 2],
+            [3],
+        ]
+        self.coords = self.coords_real = np.array([
+            [-30, -60],
+            [60, -30],
+            [-90, 0],
+            [30, 30],
+        ], dtype=np.float32)
+        self.offset = np.array([0, 0], dtype=np.float32)
+
+    def _get_graph(self):
+        self.graph = [
+            [1, 2],
+            [3],
+        ]
+        self.coords_real = np.array([
+            [-30, -60],
+            [60, -30],
+            [-90, 0],
+            [30, 30],
+        ], dtype=np.float32)
+        self.coords = self.coords_real
+        self.offset = np.array([0, 0], dtype=np.float32)
+
     def paintEvent(self, event):
-        print('drawing!')
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        # painter.setBrush(QBrush(QColor(randint(0, 255), randint(0, 255), randint(0, 255))))
+        w, h = painter.viewport().width(), painter.viewport().height()
+        painter.setWindow(-w//2, -h//2, w, h)
 
-        w, h = painter.device().width(), painter.device().height()
+        self._draw_edges(painter)
+        self._draw_vertices(painter)
 
-        grid_side = 10
-        for i in range(grid_side):
-            for j in range(grid_side):
-                painter.setBrush(QBrush(QColor(randint(0, 255), randint(0, 255), randint(0, 255))))
-                painter.drawEllipse(i*w//10, j*h//10, w//10, h//10)
-        # fast indeed
+    def wheelEvent(self, a0: QWheelEvent) -> None:
+        prev_scale = self.scale
+        self.scale += self.scale_per_angle * a0.angleDelta().y()
+        self.scale = min(self.max_scale, max(self.min_scale, self.scale))
+        pos = np.array([a0.position().x() - self.width()/2, a0.position().y() - self.height()/2])
+        self.offset += (1 - self.scale / prev_scale) * (pos - self.offset)
+        self.coords = self.scale * self.coords_real
+        self.repaint()
+
+    def _draw_vertices(self, painter: QPainter):
+        painter.setBrush(QBrush(self.vertex_color))
+        painter.setPen(QPen(painter.brush(), 1))
+        for i in range(len(self.coords)):
+            self._draw_vertex(painter, i)
+
+    def _draw_edges(self, painter: QPainter):
+        painter.setPen(QPen(self.edge_color, self.scale * self.edge_size))
+        for i, v in enumerate(self.graph):
+            for j in v:
+                self._draw_edge(painter, i, j)
+
+    def _draw_vertex(self, painter: QPainter, i: int):
+        painter.drawEllipse(
+            QPointF(*(self.scale * self.coords_real[i] + self.offset)),
+            self.scale * self.vertex_radius,
+            self.scale * self.vertex_radius
+        )
+
+    def _draw_edge(self, painter: QPainter, i: int, j: int):
+        painter.drawLine(
+            QPointF(*(self.scale * self.coords_real[i] + self.offset)),
+            QPointF(*(self.scale * self.coords_real[j] + self.offset))
+        )
 
 
 class MainWindow(QMainWindow):
@@ -45,7 +110,6 @@ class MainWindow(QMainWindow):
         self._init_elements()
 
     def _init_ui(self):
-
         right_layout = QVBoxLayout(self)
         right_layout.addWidget(self.ollivier_button)
         right_layout.addWidget(self.forman_button)
