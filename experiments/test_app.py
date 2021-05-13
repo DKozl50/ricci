@@ -1,12 +1,21 @@
 import sys
+import enum
+
 import networkx as nx
 import numpy as np
 from ricci_calculators import ollivier
 from PyQt5.QtWidgets import QMainWindow, QApplication, \
     QPushButton, QVBoxLayout, QHBoxLayout, QWidget
 from PyQt5.QtGui import QPalette, QPainter, QBrush, QPen, \
-    QColor, QWheelEvent
-from PyQt5.QtCore import QPointF
+    QColor, QMouseEvent, QWheelEvent
+from PyQt5.QtCore import QPointF, Qt
+
+
+class MouseState(enum.Enum):
+    released = 0
+    down_idle = 1
+    move_field = 2
+    move_vertex = 3
 
 
 class GraphView(QWidget):
@@ -15,41 +24,40 @@ class GraphView(QWidget):
         self.setBackgroundRole(QPalette.Base)
         self.setAutoFillBackground(True)
 
-        self.scale_per_angle = .005
+        self.scale_per_angle = .003
         self.scale = 1.
         self.max_scale = 5.
-        self.min_scale = 0.2
+        self.min_scale = 0.5
 
         self.vertex_color = QColor(255, 69, 0)  # orangered
         self.vertex_radius = 20
         self.edge_color = QColor(0, 0, 255)  # black
         self.edge_size = 3
 
-        self.graph = [
-            [1, 2],
-            [3],
-        ]
-        self.coords = self.coords_real = np.array([
-            [-30, -60],
-            [60, -30],
-            [-90, 0],
-            [30, 30],
-        ], dtype=np.float32)
+        self.mouse = MouseState.released
+        self.mouse_pos = None
+        self.moved_vertex = None
+
+        self.offset = None
+        self.v_offsets = None
+        self.reset()
+
+    def reset(self):
+        self._get_graph()
         self.offset = np.array([0, 0], dtype=np.float32)
+        self.v_offsets = np.zeros(self.coords.shape)
 
     def _get_graph(self):
         self.graph = [
             [1, 2],
             [3],
         ]
-        self.coords_real = np.array([
+        self.coords = np.array([
             [-30, -60],
             [60, -30],
             [-90, 0],
             [30, 30],
         ], dtype=np.float32)
-        self.coords = self.coords_real
-        self.offset = np.array([0, 0], dtype=np.float32)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -60,13 +68,50 @@ class GraphView(QWidget):
         self._draw_edges(painter)
         self._draw_vertices(painter)
 
+    def mousePressEvent(self, a0: QMouseEvent) -> None:
+        if a0.button() == Qt.LeftButton:
+            self.mouse_pos = np.array([
+                a0.localPos().x() - self.width() / 2,
+                a0.localPos().y() - self.height() / 2
+            ])
+            self.mouse = MouseState.down_idle
+            for i, v in enumerate(self.coords):
+                if self._inside_v(i, self.mouse_pos):
+                    self.mouse = MouseState.move_vertex
+                    self.moved_vertex = i
+
+    def mouseMoveEvent(self, a0: QMouseEvent) -> None:
+        pos = np.array([
+            a0.localPos().x() - self.width() / 2,
+            a0.localPos().y() - self.height() / 2
+        ])
+
+        if self.mouse == MouseState.move_vertex:
+            self._move_vertex(pos)
+        else:
+            if self.mouse == MouseState.down_idle:
+                self.mouse = MouseState.move_field
+            self._move_field(pos)
+
+        self.mouse_pos = pos
+        self.repaint()
+
+    def _move_vertex(self, pos: np.ndarray):
+        self.v_offsets[self.moved_vertex] += (pos - self.mouse_pos) / self.scale
+
+    def _move_field(self, pos: np.ndarray):
+        self.offset += pos - self.mouse_pos
+
+    def mouseReleaseEvent(self, a0: QMouseEvent) -> None:
+        if a0.button() == Qt.LeftButton:
+            self.mouse = MouseState.released
+
     def wheelEvent(self, a0: QWheelEvent) -> None:
         prev_scale = self.scale
         self.scale += self.scale_per_angle * a0.angleDelta().y()
         self.scale = min(self.max_scale, max(self.min_scale, self.scale))
         pos = np.array([a0.position().x() - self.width()/2, a0.position().y() - self.height()/2])
         self.offset += (1 - self.scale / prev_scale) * (pos - self.offset)
-        self.coords = self.scale * self.coords_real
         self.repaint()
 
     def _draw_vertices(self, painter: QPainter):
@@ -81,17 +126,28 @@ class GraphView(QWidget):
             for j in v:
                 self._draw_edge(painter, i, j)
 
+    def _v_center(self, i: int):
+        return self.scale * (self.coords[i] + self.v_offsets[i]) + self.offset
+
+    def _calc_coord(self, i: int):
+        return QPointF(*self._v_center(i))
+
+    def _inside_v(self, vertex_i: int, other: np.ndarray):
+        vertex = self._v_center(vertex_i)
+        dist2 = ((vertex - other)**2).sum()
+        return dist2 < (self.vertex_radius * self.scale)**2
+
     def _draw_vertex(self, painter: QPainter, i: int):
         painter.drawEllipse(
-            QPointF(*(self.scale * self.coords_real[i] + self.offset)),
+            self._calc_coord(i),
             self.scale * self.vertex_radius,
             self.scale * self.vertex_radius
         )
 
     def _draw_edge(self, painter: QPainter, i: int, j: int):
         painter.drawLine(
-            QPointF(*(self.scale * self.coords_real[i] + self.offset)),
-            QPointF(*(self.scale * self.coords_real[j] + self.offset))
+            self._calc_coord(i),
+            self._calc_coord(j)
         )
 
 
