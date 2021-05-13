@@ -30,8 +30,9 @@ class GraphView(QWidget):
         self.min_scale = 0.5
 
         self.vertex_color = QColor(255, 69, 0)  # orangered
+        self.vertex_border_color = QColor(0, 0, 0)  # black
         self.vertex_radius = 20
-        self.edge_color = QColor(0, 0, 255)  # black
+        self.edge_color = QColor(0, 0, 255)  # blue
         self.edge_size = 3
 
         self.mouse = MouseState.released
@@ -116,7 +117,7 @@ class GraphView(QWidget):
 
     def _draw_vertices(self, painter: QPainter):
         painter.setBrush(QBrush(self.vertex_color))
-        painter.setPen(QPen(painter.brush(), 1))
+        painter.setPen(QPen(self.vertex_border_color, 0.5))
         for i in range(len(self.coords)):
             self._draw_vertex(painter, i)
 
