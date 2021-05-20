@@ -3,7 +3,7 @@ import enum
 
 import networkx as nx
 import numpy as np
-from ricci_calculators import ollivier
+from ricci_calculators import ollivier, forman
 from PyQt5.QtWidgets import QMainWindow, QApplication, \
     QPushButton, QVBoxLayout, QHBoxLayout, QWidget
 from PyQt5.QtGui import QPalette, QPainter, QBrush, QPen, \
@@ -31,9 +31,12 @@ class GraphView(QWidget):
 
         self.vertex_color = QColor(255, 69, 0)  # orangered
         self.vertex_border_color = QColor(0, 0, 0)  # black
-        self.vertex_radius = 20
-        self.edge_color = QColor(0, 0, 255)  # blue
-        self.edge_size = 3
+        self.vertex_radius = 4
+        self.default_edge_color = QColor(0, 0, 0)  # blue
+        self.max_edge_color = QColor(200, 0, 0)
+        self.min_edge_color = QColor(0, 0, 255)
+        self.edge_size = 1
+        self.graph_convert_scale = 2 * self.width()
 
         self.mouse = MouseState.released
         self.mouse_pos = None
@@ -41,24 +44,38 @@ class GraphView(QWidget):
 
         self.offset = None
         self.v_offsets = None
+
+        self.graph = None
+        self.param = None
+        self.vertex_count = 0
+        self.coords = None
+
+        self._init_graph()
         self.reset()
 
     def reset(self):
-        self._get_graph()
         self.offset = np.array([0, 0], dtype=np.float32)
+        self.scale = 1
         self.v_offsets = np.zeros(self.coords.shape)
+        self.repaint()
 
-    def _get_graph(self):
-        self.graph = [
-            [1, 2],
-            [3],
-        ]
-        self.coords = np.array([
-            [-30, -60],
-            [60, -30],
-            [-90, 0],
-            [30, 30],
-        ], dtype=np.float32)
+    def _init_graph(self):
+        # probably will not be used, but for a good measure
+        self.set_graph(np.array([
+            [0, 1, 0, 0],
+            [1, 0, 1, 0],
+            [0, 1, 0, 1],
+            [0, 0, 1, 0],
+        ]))
+
+    def set_graph(self, mat: np.ndarray, param: np.ndarray = None):
+        self.graph = mat
+        self.param = param
+        self.vertex_count = self.graph.shape[0]
+        pos = nx.spring_layout(nx.from_numpy_matrix(self.graph))
+        self.coords = np.array(list(pos.values()), dtype=np.float32) * self.graph_convert_scale
+        self.reset()
+        self.repaint()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -122,10 +139,17 @@ class GraphView(QWidget):
             self._draw_vertex(painter, i)
 
     def _draw_edges(self, painter: QPainter):
-        painter.setPen(QPen(self.edge_color, self.scale * self.edge_size))
-        for i, v in enumerate(self.graph):
-            for j in v:
-                self._draw_edge(painter, i, j)
+        if self.param is None:
+            color_mode = 1
+        else:
+            color_mode = -1
+        for i in range(self.vertex_count):
+            for j in range(i+1, self.vertex_count):
+                # TODO check if it is oriented
+
+                # check if edge is present
+                if self.graph[i, j] != 0:
+                    self._draw_edge(painter, i, j, color_mode)
 
     def _v_center(self, i: int):
         return self.scale * (self.coords[i] + self.v_offsets[i]) + self.offset
@@ -145,7 +169,29 @@ class GraphView(QWidget):
             self.scale * self.vertex_radius
         )
 
-    def _draw_edge(self, painter: QPainter, i: int, j: int):
+    def _draw_edge(self, painter: QPainter, i: int, j: int, color_mode: int):
+        if color_mode == 1:
+            painter.setPen(QPen(self.default_edge_color, self.scale * self.edge_size))
+        elif color_mode == -1:
+            emin = self.param.min()
+            delta = self.param.max() - emin
+            cur_coef = (self.param[i, j]-emin) / delta
+            curr_col = QColor(
+                int(
+                    cur_coef * self.max_edge_color.red() +
+                    (1 - cur_coef) * self.min_edge_color.red()
+                ),
+                int(
+                    cur_coef * self.max_edge_color.green() +
+                    (1 - cur_coef) * self.min_edge_color.green()
+                ),
+                int(
+                    cur_coef * self.max_edge_color.blue() +
+                    (1 - cur_coef) * self.min_edge_color.blue()
+                )
+            )
+            painter.setPen(QPen(curr_col, self.scale * self.edge_size))
+
         painter.drawLine(
             self._calc_coord(i),
             self._calc_coord(j)
@@ -162,6 +208,9 @@ class MainWindow(QMainWindow):
         self.ollivier_button = QPushButton(self)
         self.forman_button = QPushButton(self)
         self.refresh_button = QPushButton(self)
+        self.new_graph_button = QPushButton(self)
+
+        self.graph = None
 
         self._init_ui()
         self._init_elements()
@@ -171,6 +220,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.ollivier_button)
         right_layout.addWidget(self.forman_button)
         right_layout.addWidget(self.refresh_button)
+        right_layout.addWidget(self.new_graph_button)
 
         main_layout = QHBoxLayout(self)
         main_layout.addWidget(self.view)
@@ -182,14 +232,11 @@ class MainWindow(QMainWindow):
 
     def _init_elements(self):
         self._init_graph()
-        # self._init_gview()
         self._init_buttons()
         self.show()
 
     def _init_graph(self):
-        self.graph = nx.random_geometric_graph(50, 0.125)
-        # _fix_graph(self.graph)
-        ollivier(self.graph)
+        self.new_graph()
 
     def _init_buttons(self):
         self.ollivier_button.setText('Ollivier')
@@ -197,13 +244,30 @@ class MainWindow(QMainWindow):
         self.forman_button.setText('Forman')
         self.forman_button.clicked.connect(self.forman_handler)
         self.refresh_button.setText('Refresh network')
-        # self.refresh_button.clicked.connect(self.update_gview)
+        self.refresh_button.clicked.connect(self.reset_handler)
+        self.new_graph_button.setText('New graph')
+        self.new_graph_button.clicked.connect(self.new_graph)
 
     def ollivier_handler(self):
-        pass
+        self.view.set_graph(
+            nx.adjacency_matrix(self.graph).toarray(),
+            nx.adjacency_matrix(self.graph, weight='ollivier').toarray()
+        )
 
     def forman_handler(self):
-        pass
+        self.view.set_graph(
+            nx.adjacency_matrix(self.graph).toarray(),
+            nx.adjacency_matrix(self.graph, weight='forman').toarray()
+        )
+
+    def reset_handler(self):
+        self.view.set_graph(nx.adjacency_matrix(self.graph).toarray())
+
+    def new_graph(self):
+        self.graph = nx.random_geometric_graph(50, 0.125)
+        ollivier(self.graph)
+        forman(self.graph)
+        self.view.set_graph(nx.adjacency_matrix(self.graph).toarray())
 
 
 print('step 1')
