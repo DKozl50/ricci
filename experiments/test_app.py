@@ -1,11 +1,13 @@
 import sys
 import enum
+from typing import Union
 
 import networkx as nx
 import numpy as np
 from ricci_calculators import ollivier, forman
 from PyQt5.QtWidgets import QMainWindow, QApplication, \
-    QPushButton, QVBoxLayout, QHBoxLayout, QWidget
+    QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QLabel, \
+    QRadioButton, QGroupBox
 from PyQt5.QtGui import QPalette, QPainter, QBrush, QPen, \
     QColor, QMouseEvent, QWheelEvent
 from PyQt5.QtCore import QPointF, Qt
@@ -46,7 +48,8 @@ class GraphView(QWidget):
         self.v_offsets = None
 
         self.graph = None
-        self.param = None
+        self.params = None
+        self.curr_param = -1
         self.vertex_count = 0
         self.coords = None
 
@@ -68,13 +71,19 @@ class GraphView(QWidget):
             [0, 0, 1, 0],
         ]))
 
-    def set_graph(self, mat: np.ndarray, param: np.ndarray = None):
+    def set_graph(self, mat: np.ndarray):
         self.graph = mat
-        self.param = param
         self.vertex_count = self.graph.shape[0]
         pos = nx.spring_layout(nx.from_numpy_matrix(self.graph))
         self.coords = np.array(list(pos.values()), dtype=np.float32) * self.graph_convert_scale
         self.reset()
+        self.repaint()
+
+    def set_params(self, **kwargs):
+        self.params = kwargs
+
+    def change_param(self, key: Union[int, str]):
+        self.curr_param = key
         self.repaint()
 
     def paintEvent(self, event):
@@ -139,17 +148,21 @@ class GraphView(QWidget):
             self._draw_vertex(painter, i)
 
     def _draw_edges(self, painter: QPainter):
-        if self.param is None:
-            color_mode = 1
+        if self.curr_param == -1:
+            mode = 1
         else:
-            color_mode = -1
+            mode = -1
+        # if self.param is None:
+        #     color_mode = 1
+        # else:
+        #     color_mode = -1
         for i in range(self.vertex_count):
             for j in range(i+1, self.vertex_count):
                 # TODO check if it is oriented
 
                 # check if edge is present
                 if self.graph[i, j] != 0:
-                    self._draw_edge(painter, i, j, color_mode)
+                    self._draw_edge(painter, i, j, mode)
 
     def _v_center(self, i: int):
         return self.scale * (self.coords[i] + self.v_offsets[i]) + self.offset
@@ -169,13 +182,14 @@ class GraphView(QWidget):
             self.scale * self.vertex_radius
         )
 
-    def _draw_edge(self, painter: QPainter, i: int, j: int, color_mode: int):
-        if color_mode == 1:
+    def _draw_edge(self, painter: QPainter, i: int, j: int, mode: int):
+        if mode == 1:
             painter.setPen(QPen(self.default_edge_color, self.scale * self.edge_size))
-        elif color_mode == -1:
-            emin = self.param.min()
-            delta = self.param.max() - emin
-            cur_coef = (self.param[i, j]-emin) / delta
+        elif mode == -1:
+            c_val = self.params[self.curr_param]
+            emin = c_val.min()
+            delta = c_val.max() - emin
+            cur_coef = (c_val[i, j]-emin) / delta
             curr_col = QColor(
                 int(
                     cur_coef * self.max_edge_color.red() +
@@ -205,8 +219,11 @@ class MainWindow(QMainWindow):
         self.resize(750, 600)
 
         self.view = GraphView(self)
-        self.ollivier_button = QPushButton(self)
-        self.forman_button = QPushButton(self)
+        self.click_info = QLabel(self)
+        self.view_type_box = QGroupBox(self)
+        self.vt_default_rb = QRadioButton(self)
+        self.vt_ollivier_rb = QRadioButton(self)
+        self.vt_forman_rb = QRadioButton(self)
         self.refresh_button = QPushButton(self)
         self.new_graph_button = QPushButton(self)
 
@@ -216,9 +233,15 @@ class MainWindow(QMainWindow):
         self._init_elements()
 
     def _init_ui(self):
+        view_type_box_layout = QVBoxLayout(self)
+        view_type_box_layout.addWidget(self.vt_default_rb)
+        view_type_box_layout.addWidget(self.vt_ollivier_rb)
+        view_type_box_layout.addWidget(self.vt_forman_rb)
+        self.view_type_box.setLayout(view_type_box_layout)
+
         right_layout = QVBoxLayout(self)
-        right_layout.addWidget(self.ollivier_button)
-        right_layout.addWidget(self.forman_button)
+        right_layout.addWidget(self.click_info)
+        right_layout.addWidget(self.view_type_box)
         right_layout.addWidget(self.refresh_button)
         right_layout.addWidget(self.new_graph_button)
 
@@ -232,42 +255,59 @@ class MainWindow(QMainWindow):
 
     def _init_elements(self):
         self._init_graph()
+        self._init_info()
+        self._init_view_type()
         self._init_buttons()
         self.show()
 
     def _init_graph(self):
         self.new_graph()
 
+    def _init_info(self):
+        self.click_info.setText('Click on an edge to get information')
+
+    def _init_view_type(self):
+        self.view_type_box.setTitle('Choose edge information')
+        self.vt_default_rb.setText('Nothing')
+        self.vt_default_rb.toggled.connect(self.set_default_view)
+        self.vt_ollivier_rb.setText('Ollivier')
+        self.vt_ollivier_rb.toggled.connect(self.set_ollivier_view)
+        self.vt_forman_rb.setText('Forman')
+        self.vt_forman_rb.toggled.connect(self.set_forman_view)
+
+        self.vt_default_rb.setChecked(True)
+
     def _init_buttons(self):
-        self.ollivier_button.setText('Ollivier')
-        self.ollivier_button.clicked.connect(self.ollivier_handler)
-        self.forman_button.setText('Forman')
-        self.forman_button.clicked.connect(self.forman_handler)
-        self.refresh_button.setText('Refresh network')
+        self.refresh_button.setText('Reset view')
         self.refresh_button.clicked.connect(self.reset_handler)
         self.new_graph_button.setText('New graph')
         self.new_graph_button.clicked.connect(self.new_graph)
 
-    def ollivier_handler(self):
-        self.view.set_graph(
-            nx.adjacency_matrix(self.graph).toarray(),
-            nx.adjacency_matrix(self.graph, weight='ollivier').toarray()
-        )
+    def set_default_view(self):
+        if self.sender().isChecked():
+            self.view.change_param(-1)
 
-    def forman_handler(self):
-        self.view.set_graph(
-            nx.adjacency_matrix(self.graph).toarray(),
-            nx.adjacency_matrix(self.graph, weight='forman').toarray()
-        )
+    def set_ollivier_view(self):
+        if self.sender().isChecked():
+            self.view.change_param('ollivier')
+
+    def set_forman_view(self):
+        if self.sender().isChecked():
+            self.view.change_param('forman')
 
     def reset_handler(self):
-        self.view.set_graph(nx.adjacency_matrix(self.graph).toarray())
+        self.view.curr_param = -1
+        self.view.reset()
 
     def new_graph(self):
         self.graph = nx.random_geometric_graph(50, 0.125)
         ollivier(self.graph)
         forman(self.graph)
         self.view.set_graph(nx.adjacency_matrix(self.graph).toarray())
+        self.view.set_params(
+            ollivier=nx.adjacency_matrix(self.graph, weight='ollivier').toarray(),
+            forman=nx.adjacency_matrix(self.graph, weight='forman').toarray(),
+        )
 
 
 print('step 1')
