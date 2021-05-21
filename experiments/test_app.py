@@ -9,8 +9,8 @@ from PyQt5.QtWidgets import QMainWindow, QApplication, \
     QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QLabel, \
     QRadioButton, QGroupBox
 from PyQt5.QtGui import QPalette, QPainter, QBrush, QPen, \
-    QColor, QMouseEvent, QWheelEvent
-from PyQt5.QtCore import QPointF, Qt
+    QColor, QMouseEvent, QWheelEvent, QPainterPath
+from PyQt5.QtCore import QPointF, Qt, QRectF
 
 
 class MouseState(enum.Enum):
@@ -26,19 +26,23 @@ class GraphView(QWidget):
         self.setBackgroundRole(QPalette.Base)
         self.setAutoFillBackground(True)
 
+        self.info_field = None
+
         self.scale_per_angle = .003
         self.scale = 1.
         self.max_scale = 5.
         self.min_scale = 0.5
 
-        self.vertex_color = QColor(255, 69, 0)  # orangered
-        self.vertex_border_color = QColor(0, 0, 0)  # black
         self.vertex_radius = 4
-        self.default_edge_color = QColor(0, 0, 0)  # blue
-        self.max_edge_color = QColor(200, 0, 0)
-        self.min_edge_color = QColor(0, 0, 255)
         self.edge_size = 1
         self.graph_convert_scale = 2 * self.width()
+        self.orient_edge_control_offset = 2.5
+
+        self.vertex_color = QColor(200, 200, 200)  # gray
+        self.vertex_border_color = QColor(0, 0, 0)  # black
+        self.default_edge_color = QColor(0, 0, 0)  # black
+        self.max_edge_color = QColor(255, 0, 0)  # red
+        self.min_edge_color = QColor(0, 0, 255)  # blue
 
         self.mouse = MouseState.released
         self.mouse_pos = None
@@ -52,9 +56,13 @@ class GraphView(QWidget):
         self.curr_param = -1
         self.vertex_count = 0
         self.coords = None
+        self.symmertic = True
 
         self._init_graph()
         self.reset()
+
+    def connect_info_field(self, a0):
+        self.info_field = a0
 
     def reset(self):
         self.offset = np.array([0, 0], dtype=np.float32)
@@ -73,6 +81,8 @@ class GraphView(QWidget):
 
     def set_graph(self, mat: np.ndarray):
         self.graph = mat
+        self.symmertic = (mat.T == mat).all().all()
+        self.symmertic = False
         self.vertex_count = self.graph.shape[0]
         pos = nx.spring_layout(nx.from_numpy_matrix(self.graph))
         self.coords = np.array(list(pos.values()), dtype=np.float32) * self.graph_convert_scale
@@ -147,23 +157,6 @@ class GraphView(QWidget):
         for i in range(len(self.coords)):
             self._draw_vertex(painter, i)
 
-    def _draw_edges(self, painter: QPainter):
-        if self.curr_param == -1:
-            mode = 1
-        else:
-            mode = -1
-        # if self.param is None:
-        #     color_mode = 1
-        # else:
-        #     color_mode = -1
-        for i in range(self.vertex_count):
-            for j in range(i+1, self.vertex_count):
-                # TODO check if it is oriented
-
-                # check if edge is present
-                if self.graph[i, j] != 0:
-                    self._draw_edge(painter, i, j, mode)
-
     def _v_center(self, i: int):
         return self.scale * (self.coords[i] + self.v_offsets[i]) + self.offset
 
@@ -182,34 +175,73 @@ class GraphView(QWidget):
             self.scale * self.vertex_radius
         )
 
-    def _draw_edge(self, painter: QPainter, i: int, j: int, mode: int):
-        if mode == 1:
-            painter.setPen(QPen(self.default_edge_color, self.scale * self.edge_size))
-        elif mode == -1:
-            c_val = self.params[self.curr_param]
-            emin = c_val.min()
-            delta = c_val.max() - emin
-            cur_coef = (c_val[i, j]-emin) / delta
-            curr_col = QColor(
-                int(
-                    cur_coef * self.max_edge_color.red() +
-                    (1 - cur_coef) * self.min_edge_color.red()
-                ),
-                int(
-                    cur_coef * self.max_edge_color.green() +
-                    (1 - cur_coef) * self.min_edge_color.green()
-                ),
-                int(
-                    cur_coef * self.max_edge_color.blue() +
-                    (1 - cur_coef) * self.min_edge_color.blue()
-                )
-            )
-            painter.setPen(QPen(curr_col, self.scale * self.edge_size))
+    def _draw_edges(self, painter: QPainter):
+        if self.curr_param == -1:
+            mode = 1
+            norm_param = self.graph
+        else:
+            mode = -1
+            norm_param = self.params[self.curr_param]
+            n_min = norm_param.min()
+            n_delta = norm_param.max() - n_min
+            norm_param = (norm_param - n_min) / n_delta
 
+        for i in range(self.vertex_count):
+            for j in range(i+1, self.vertex_count):
+                if self.symmertic:
+                    self._draw_edge_sym(painter, i, j, mode, norm_param[i, j])
+                else:
+                    self._draw_edge_ori(painter, i, j, mode, norm_param[i, j])
+                    self._draw_edge_ori(painter, j, i, mode, norm_param[j, i])
+
+    def _draw_edge_sym(self, painter: QPainter, i: int, j: int, mode: int, coef: float):
+        if self.graph[i, j] == 0:
+            return
+        self._set_pen(painter, mode, coef)
         painter.drawLine(
             self._calc_coord(i),
             self._calc_coord(j)
         )
+
+    def _draw_edge_ori(self, painter: QPainter, i: int, j: int, mode: int, coef: float):
+        if self.graph[i, j] == 0:
+            return
+        self._set_pen(painter, mode, coef)
+        path = QPainterPath()
+        path.moveTo(self._calc_coord(i))
+        a = self._v_center(i)
+        b = self._v_center(j)
+        ban = np.array([[0, 1.], [-1., 0]]) @ (b - a)
+        ban /= np.linalg.norm(ban)
+        ban *= self.orient_edge_control_offset * self.scale
+        c1 = a + ban
+        c2 = b + ban
+
+        path.cubicTo(QPointF(*c1), QPointF(*c2), self._calc_coord(j))
+        painter.drawPath(path)
+
+    def _get_edge_color(self, coef: float):
+        return QColor(
+            int(
+                coef * self.max_edge_color.red() +
+                (1 - coef) * self.min_edge_color.red()
+            ),
+            int(
+                coef * self.max_edge_color.green() +
+                (1 - coef) * self.min_edge_color.green()
+            ),
+            int(
+                coef * self.max_edge_color.blue() +
+                (1 - coef) * self.min_edge_color.blue()
+            )
+        )
+
+    def _set_pen(self, painter: QPainter, mode: int, coef: float = None):
+        if mode == 1:
+            painter.setPen(QPen(self.default_edge_color, self.scale * self.edge_size))
+        elif mode == -1:
+            curr_col = self._get_edge_color(coef)
+            painter.setPen(QPen(curr_col, self.scale * self.edge_size))
 
 
 class MainWindow(QMainWindow):
@@ -261,7 +293,8 @@ class MainWindow(QMainWindow):
         self.show()
 
     def _init_graph(self):
-        self.new_graph()
+        self.view.connect_info_field(self.click_info)
+        self.random_graph()
 
     def _init_info(self):
         self.click_info.setText('Click on an edge to get information')
@@ -281,7 +314,7 @@ class MainWindow(QMainWindow):
         self.refresh_button.setText('Reset view')
         self.refresh_button.clicked.connect(self.reset_handler)
         self.new_graph_button.setText('New graph')
-        self.new_graph_button.clicked.connect(self.new_graph)
+        self.new_graph_button.clicked.connect(self.random_graph)
 
     def set_default_view(self):
         if self.sender().isChecked():
@@ -296,10 +329,9 @@ class MainWindow(QMainWindow):
             self.view.change_param('forman')
 
     def reset_handler(self):
-        self.view.curr_param = -1
         self.view.reset()
 
-    def new_graph(self):
+    def random_graph(self):
         self.graph = nx.random_geometric_graph(50, 0.125)
         ollivier(self.graph)
         forman(self.graph)
