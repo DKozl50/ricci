@@ -1,5 +1,6 @@
 import sys
 import enum
+from math import atan2
 from typing import Union
 
 import networkx as nx
@@ -10,7 +11,7 @@ from PyQt5.QtWidgets import QMainWindow, QApplication, \
     QRadioButton, QGroupBox
 from PyQt5.QtGui import QPalette, QPainter, QBrush, QPen, \
     QColor, QMouseEvent, QWheelEvent, QPainterPath
-from PyQt5.QtCore import QPointF, Qt, QRectF
+from PyQt5.QtCore import QPointF, Qt
 
 
 class MouseState(enum.Enum):
@@ -37,6 +38,7 @@ class GraphView(QWidget):
         self.edge_size = 1
         self.graph_convert_scale = 2 * self.width()
         self.orient_edge_control_offset = 2.5
+        self.triangle_size = 4
 
         self.vertex_color = QColor(200, 200, 200)  # gray
         self.vertex_border_color = QColor(0, 0, 0)  # black
@@ -59,15 +61,16 @@ class GraphView(QWidget):
         self.symmertic = True
 
         self._init_graph()
-        self.reset()
+        self.reset(True)
 
     def connect_info_field(self, a0):
         self.info_field = a0
 
-    def reset(self):
+    def reset(self, hard=False):
         self.offset = np.array([0, 0], dtype=np.float32)
         self.scale = 1
-        self.v_offsets = np.zeros(self.coords.shape)
+        if hard:
+            self.v_offsets = np.zeros(self.coords.shape)
         self.repaint()
 
     def _init_graph(self):
@@ -82,11 +85,10 @@ class GraphView(QWidget):
     def set_graph(self, mat: np.ndarray):
         self.graph = mat
         self.symmertic = (mat.T == mat).all().all()
-        self.symmertic = False
         self.vertex_count = self.graph.shape[0]
         pos = nx.spring_layout(nx.from_numpy_matrix(self.graph))
         self.coords = np.array(list(pos.values()), dtype=np.float32) * self.graph_convert_scale
-        self.reset()
+        self.reset(True)
         self.repaint()
 
     def set_params(self, **kwargs):
@@ -182,9 +184,12 @@ class GraphView(QWidget):
         else:
             mode = -1
             norm_param = self.params[self.curr_param]
-            n_min = norm_param.min()
-            n_delta = norm_param.max() - n_min
-            norm_param = (norm_param - n_min) / n_delta
+            n_min = norm_param[self.graph != 0].min()
+            n_delta = norm_param[self.graph != 0].max() - n_min
+            if n_delta == 0:
+                norm_param = np.ones(norm_param.shape) / 2  # set 0.5 everywhere
+            else:
+                norm_param = (norm_param - n_min) / n_delta
 
         for i in range(self.vertex_count):
             for j in range(i+1, self.vertex_count):
@@ -218,7 +223,32 @@ class GraphView(QWidget):
         c2 = b + ban
 
         path.cubicTo(QPointF(*c1), QPointF(*c2), self._calc_coord(j))
+
+        self._draw_arrow_at(painter, path, 0.55)
         painter.drawPath(path)
+
+    def _draw_arrow_at(self, painter: QPainter, path: QPainterPath, where: float):
+        real_point = path.pointAtPercent(where)
+        real_point = np.array([real_point.x(), real_point.y()])
+        other_point = path.pointAtPercent(where+0.01)
+        other_point = np.array([other_point.x(), other_point.y()])
+        delta = other_point - real_point
+        delta /= np.linalg.norm(delta)
+        delta_perp = np.array([[0, 1.], [-1., 0]]) @ delta
+
+        ts = self.triangle_size * self.scale
+
+        p1 = real_point + delta_perp * ts/2
+        p2 = real_point + delta * ts * 1.5
+        p3 = real_point - delta_perp * ts/2
+        tripath = QPainterPath()
+        tripath.moveTo(*p1)
+        tripath.lineTo(*p2)
+        tripath.lineTo(*p3)
+        tripath.lineTo(*p1)
+
+        painter.fillPath(tripath, QBrush(painter.pen().color()))
+        painter.drawPath(tripath)
 
     def _get_edge_color(self, coef: float):
         return QColor(
