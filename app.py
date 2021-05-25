@@ -492,9 +492,6 @@ class MainWindow(QMainWindow):
         )
 
 
-print('step 1')
 app = QApplication(sys.argv)
-print('step 2')
 window = MainWindow()
-print('step 3')
 app.exec_()
