@@ -68,57 +68,6 @@ class GraphView(QWidget):
         self._init_graph()
         self.reset(True)
 
-    def connect_info_field(self, a0):
-        self.info_field = a0
-        self.info_field_default_text = a0.text()
-
-    def update_info(self):
-        if self.highlighted_edge is None:
-            self.info_field.setText(self.info_field_default_text)
-            return
-        (i, j) = self.highlighted_edge
-        self.info_field.setText(
-            'Edge weight:  \t%.5g\n' % self.graph[i, j]
-            + 'Ollivier curvature:  \t%.5g\n' % self.params['ollivier'][i, j]
-            + 'Forman curvature:  \t%.5g\n' % self.params['forman'][i, j]
-        )
-
-    def reset(self, hard=False):
-        self.offset = np.array([0, 0], dtype=np.float32)
-        self.scale = 1
-        if hard:
-            self.v_offsets = np.zeros(self.coords.shape)
-        self.repaint()
-
-    def _init_graph(self):
-        # probably will not be used, but for a good measure
-        self.set_graph(np.array([
-            [0, 1, 0, 0],
-            [1, 0, 1, 0],
-            [0, 1, 0, 1],
-            [0, 0, 1, 0],
-        ]))
-
-    def set_graph(self, mat: np.ndarray):
-        self.graph = mat
-        self.symmertic = (mat.T == mat).all().all()
-        self.vertex_count = self.graph.shape[0]
-        pos = nx.spring_layout(
-            nx.from_numpy_array(self.graph),
-            k=np.sqrt(np.sqrt(rc.connected_components(self.graph))/self.vertex_count)
-        )
-        self.coords = np.array(list(pos.values()), dtype=np.float32) * self.graph_convert_scale
-        self.reset(True)
-        self.repaint()
-
-    def set_params(self, **kwargs):
-        self.params = kwargs
-        self.repaint()
-
-    def change_param(self, key: Union[int, str]):
-        self.curr_param = key
-        self.repaint()
-
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -155,7 +104,7 @@ class GraphView(QWidget):
                 self.highlighted_edge = closest_edge
             else:
                 self.highlighted_edge = None
-            self.update_info()
+            self._update_info()
             self.repaint()
 
     def mouseMoveEvent(self, a0: QMouseEvent) -> None:
@@ -174,12 +123,6 @@ class GraphView(QWidget):
         self.mouse_pos = pos
         self.repaint()
 
-    def _move_vertex(self, pos: np.ndarray):
-        self.v_offsets[self.moved_vertex] += (pos - self.mouse_pos) / self.scale
-
-    def _move_field(self, pos: np.ndarray):
-        self.offset += pos - self.mouse_pos
-
     def mouseReleaseEvent(self, a0: QMouseEvent) -> None:
         if a0.button() == Qt.LeftButton:
             self.mouse = MouseState.released
@@ -192,40 +135,70 @@ class GraphView(QWidget):
         self.offset += (1 - self.scale / prev_scale) * (pos - self.offset)
         self.repaint()
 
+    def connect_info_field(self, a0):
+        self.info_field = a0
+        self.info_field_default_text = a0.text()
+
+    def set_graph(self, mat: np.ndarray):
+        self.graph = mat
+        self.symmertic = (mat.T == mat).all().all()
+        self.vertex_count = self.graph.shape[0]
+        pos = nx.spring_layout(
+            nx.from_numpy_array(self.graph),
+            k=np.sqrt(np.sqrt(rc.connected_components(self.graph))/self.vertex_count)
+        )
+        self.coords = np.array(list(pos.values()), dtype=np.float32) * self.graph_convert_scale
+        self.reset(True)
+        self.repaint()
+
+    def set_params(self, **kwargs):
+        self.params = kwargs
+        self.repaint()
+
+    def change_param(self, key: Union[int, str]):
+        self.curr_param = key
+        self.repaint()
+
+    def reset(self, hard=False):
+        self.offset = np.array([0, 0], dtype=np.float32)
+        self.scale = 1
+        if hard:
+            self.v_offsets = np.zeros(self.coords.shape)
+        self.repaint()
+
+    def _init_graph(self):
+        # probably will not be used, but for a good measure
+        self.set_graph(np.array([
+            [0, 1, 0, 0],
+            [1, 0, 1, 0],
+            [0, 1, 0, 1],
+            [0, 0, 1, 0],
+        ]))
+
+    def _update_info(self):
+        if self.highlighted_edge is None:
+            self.info_field.setText(self.info_field_default_text)
+            return
+        (i, j) = self.highlighted_edge
+        self.info_field.setText(
+            'Edge weight:  \t\t%0.5f\n' % self.graph[i, j]
+            + 'Ollivier curvature:  \t%0.5f\n' % self.params['ollivier'][i, j]
+            + 'Ollivier flow:  \t\t%0.5f\n' % self.params['oflow'][i, j]
+            + 'Forman curvature:  \t%0.5f\n' % self.params['forman'][i, j]
+            + 'Forman flow:  \t\t%0.5f\n' % self.params['fflow'][i, j]
+        )
+
+    def _move_vertex(self, pos: np.ndarray):
+        self.v_offsets[self.moved_vertex] += (pos - self.mouse_pos) / self.scale
+
+    def _move_field(self, pos: np.ndarray):
+        self.offset += pos - self.mouse_pos
+
     def _draw_vertices(self, painter: QPainter):
         painter.setBrush(QBrush(self.vertex_color))
         painter.setPen(QPen(self.vertex_border_color, 0.5))
-        for i in range(len(self.coords)):
+        for i in range(self.vertex_count)[::-1]:
             self._draw_vertex(painter, i)
-
-    def _v_center(self, i: int) -> np.ndarray:
-        return self.scale * (self.coords[i] + self.v_offsets[i]) + self.offset
-
-    def _calc_coord(self, i: int) -> QPointF:
-        return QPointF(*self._v_center(i))
-
-    def _inside_v(self, vertex_i: int, other: np.ndarray) -> bool:
-        vertex = self._v_center(vertex_i)
-        dist2 = ((vertex - other)**2).sum()
-        return dist2 < (self.vertex_radius * self.scale)**2
-
-    @staticmethod
-    def _dist_to_segment2(a: np.ndarray, b: np.ndarray, p: np.ndarray) -> float:
-        def d2(x, y):
-            return ((x - y)**2).sum()
-        e_len2 = d2(a, b)
-        if e_len2 == 0:
-            return d2(a, p)
-        t = min(1, max(0, np.dot(p - a, b - a) / e_len2))
-        proj = a + t * (b - a)
-        return d2(proj, p)
-
-    def _distance_to_e2(self, i: int, j: int, other: np.ndarray) -> float:
-        if self.symmertic:
-            return self._dist_to_segment2(self._v_center(i), self._v_center(j), other)
-        else:
-            # TODO offset by 1/2 self.orient_edge_control_offset
-            pass
 
     def _draw_vertex(self, painter: QPainter, i: int):
         painter.drawEllipse(
@@ -341,12 +314,50 @@ class GraphView(QWidget):
         elif mode == -2:
             painter.setPen(QPen(self.highlight_color, self.scale * (self.edge_size*self.highlight_mul)))
 
+    def _v_center(self, i: int) -> np.ndarray:
+        return self.scale * (self.coords[i] + self.v_offsets[i]) + self.offset
+
+    def _calc_coord(self, i: int) -> QPointF:
+        return QPointF(*self._v_center(i))
+
+    def _inside_v(self, vertex_i: int, other: np.ndarray) -> bool:
+        vertex = self._v_center(vertex_i)
+        dist2 = ((vertex - other)**2).sum()
+        return dist2 < (self.vertex_radius * self.scale)**2
+
+    @staticmethod
+    def _dist_to_segment2(a: np.ndarray, b: np.ndarray, p: np.ndarray) -> float:
+        def d2(x, y):
+            return ((x - y)**2).sum()
+        e_len2 = d2(a, b)
+        if e_len2 == 0:
+            return d2(a, p)
+        t = min(1, max(0, np.dot(p - a, b - a) / e_len2))
+        proj = a + t * (b - a)
+        return d2(proj, p)
+
+    def _distance_to_e2(self, i: int, j: int, other: np.ndarray) -> float:
+        if self.symmertic:
+            return self._dist_to_segment2(self._v_center(i), self._v_center(j), other)
+        else:
+            offset = self._v_center(j) - self._v_center(i)
+            offset = np.array([[0, 1.], [-1., 0]]) @ offset
+            offset = (
+                    offset / np.linalg.norm(offset)
+                    * self.orient_edge_control_offset * self.scale / 2
+            )
+            return self._dist_to_segment2(
+                self._v_center(i)+offset,
+                self._v_center(j)+offset,
+                other
+            )
+
 
 class MainWindow(QMainWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.resize(750, 600)
+        self.resize(800, 600)
 
         self.view = GraphView(self)
         self.click_info = QLabel(self)
@@ -354,8 +365,10 @@ class MainWindow(QMainWindow):
         self.vt_default_rb = QRadioButton(self)
         self.vt_ollivier_rb = QRadioButton(self)
         self.vt_forman_rb = QRadioButton(self)
+        self.vt_oflow_rb = QRadioButton(self)
+        self.vt_fflow_rb = QRadioButton(self)
         self.refresh_button = QPushButton(self)
-        self.new_graph_button = QPushButton(self)
+        self.random_graph_button = QPushButton(self)
         self.open_graph_button = QPushButton(self)
 
         self.graph = None
@@ -367,7 +380,10 @@ class MainWindow(QMainWindow):
         view_type_box_layout = QVBoxLayout(self)
         view_type_box_layout.addWidget(self.vt_default_rb)
         view_type_box_layout.addWidget(self.vt_ollivier_rb)
+        view_type_box_layout.addWidget(self.vt_oflow_rb)
         view_type_box_layout.addWidget(self.vt_forman_rb)
+        view_type_box_layout.addWidget(self.vt_fflow_rb)
+
         self.view_type_box.setLayout(view_type_box_layout)
 
         right_layout = QVBoxLayout(self)
@@ -375,7 +391,9 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.view_type_box)
         right_layout.addWidget(self.refresh_button)
         right_layout.addWidget(self.open_graph_button)
-        right_layout.addWidget(self.new_graph_button)
+        right_layout.addWidget(self.random_graph_button)
+        for i in range(right_layout.count()):
+            right_layout.itemAt(i).widget().setFixedWidth(250)
 
         main_layout = QHBoxLayout(self)
         main_layout.addWidget(self.view)
@@ -386,27 +404,32 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(widget)
 
     def _init_elements(self):
-        self._init_graph()
         self._init_info()
+        self._init_graph()
         self._init_view_type()
         self._init_buttons()
         self.show()
+
+    def _init_info(self):
+        self.click_info.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.click_info.setText('Click on an edge to get information')
 
     def _init_graph(self):
         self.view.connect_info_field(self.click_info)
         self.random_graph()
 
-    def _init_info(self):
-        self.click_info.setText('Click on an edge to get information')
-
     def _init_view_type(self):
-        self.view_type_box.setTitle('Choose edge information')
-        self.vt_default_rb.setText('Nothing')
+        self.view_type_box.setTitle('Edge information')
+        self.vt_default_rb.setText('Plain edges')
         self.vt_default_rb.toggled.connect(self.set_default_view)
-        self.vt_ollivier_rb.setText('Ollivier')
+        self.vt_ollivier_rb.setText('Ollivier curvature')
         self.vt_ollivier_rb.toggled.connect(self.set_ollivier_view)
-        self.vt_forman_rb.setText('Forman')
+        self.vt_oflow_rb.setText('Ollivier flow')
+        self.vt_oflow_rb.toggled.connect(self.set_oflow_view)
+        self.vt_forman_rb.setText('Forman curvature')
         self.vt_forman_rb.toggled.connect(self.set_forman_view)
+        self.vt_fflow_rb.setText('Forman flow')
+        self.vt_fflow_rb.toggled.connect(self.set_fflow_view)
 
         self.vt_default_rb.setChecked(True)
 
@@ -415,8 +438,8 @@ class MainWindow(QMainWindow):
         self.refresh_button.clicked.connect(self.reset_handler)
         self.open_graph_button.setText('Open graph...')
         self.open_graph_button.clicked.connect(self.open_graph)
-        self.new_graph_button.setText('Random graph')
-        self.new_graph_button.clicked.connect(self.random_graph)
+        self.random_graph_button.setText('Random graph')
+        self.random_graph_button.clicked.connect(self.random_graph)
 
     def set_default_view(self):
         if self.sender().isChecked():
@@ -426,9 +449,17 @@ class MainWindow(QMainWindow):
         if self.sender().isChecked():
             self.view.change_param('ollivier')
 
+    def set_oflow_view(self):
+        if self.sender().isChecked():
+            self.view.change_param('oflow')
+
     def set_forman_view(self):
         if self.sender().isChecked():
             self.view.change_param('forman')
+
+    def set_fflow_view(self):
+        if self.sender().isChecked():
+            self.view.change_param('fflow')
 
     def reset_handler(self):
         self.view.reset()
@@ -439,7 +470,6 @@ class MainWindow(QMainWindow):
             'NumPy pickled graphs (*.npy *.npz)'
         )
         if path[0] != '':
-            print(path[0])
             graph = np.load(path[0])
             self._set_new_graph(graph)
 
@@ -450,9 +480,15 @@ class MainWindow(QMainWindow):
     def _set_new_graph(self, graph):
         self.graph = graph
         self.view.set_graph(self.graph)
+        ollivier = np.array(rc.calculate_ollivier(self.graph, 0.))
+        oflow = np.array(rc.ricci_flow(self.graph, ollivier, float('inf'), 1))
+        forman = np.array(rc.calculate_forman(self.graph))
+        fflow = np.array(rc.ricci_flow(self.graph, forman, float('inf'), 1))
         self.view.set_params(
-            ollivier=np.array(rc.calculate_ollivier(self.graph, 0.)),
-            forman=np.array(rc.calculate_forman(self.graph))
+            ollivier=ollivier,
+            oflow=oflow,
+            forman=forman,
+            fflow=fflow
         )
 
 
