@@ -1,14 +1,13 @@
 import sys
 import enum
-from math import atan2
 from typing import Union
 
 import networkx as nx
 import numpy as np
-from ricci_calculators import ollivier, forman
+import ricci_calculator as rc
 from PyQt5.QtWidgets import QMainWindow, QApplication, \
     QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QLabel, \
-    QRadioButton, QGroupBox
+    QRadioButton, QGroupBox, QFileDialog
 from PyQt5.QtGui import QPalette, QPainter, QBrush, QPen, \
     QColor, QMouseEvent, QWheelEvent, QPainterPath
 from PyQt5.QtCore import QPointF, Qt
@@ -27,7 +26,8 @@ class GraphView(QWidget):
         self.setBackgroundRole(QPalette.Base)
         self.setAutoFillBackground(True)
 
-        self.info_field = None
+        self.info_field: Union[QLabel, None] = None
+        self.info_field_default_text = ''
 
         self.scale_per_angle = .003
         self.scale = 1.
@@ -39,12 +39,16 @@ class GraphView(QWidget):
         self.graph_convert_scale = 2 * self.width()
         self.orient_edge_control_offset = 2.5
         self.triangle_size = 4
+        self.highlight_mul = 1.7
+
+        self.edge_detection_threshold_absolute = 300
 
         self.vertex_color = QColor(200, 200, 200)  # gray
         self.vertex_border_color = QColor(0, 0, 0)  # black
         self.default_edge_color = QColor(0, 0, 0)  # black
         self.max_edge_color = QColor(255, 0, 0)  # red
         self.min_edge_color = QColor(0, 0, 255)  # blue
+        self.highlight_color = QColor(0, 255, 0)  # yellow
 
         self.mouse = MouseState.released
         self.mouse_pos = None
@@ -59,12 +63,25 @@ class GraphView(QWidget):
         self.vertex_count = 0
         self.coords = None
         self.symmertic = True
+        self.highlighted_edge = None
 
         self._init_graph()
         self.reset(True)
 
     def connect_info_field(self, a0):
         self.info_field = a0
+        self.info_field_default_text = a0.text()
+
+    def update_info(self):
+        if self.highlighted_edge is None:
+            self.info_field.setText(self.info_field_default_text)
+            return
+        (i, j) = self.highlighted_edge
+        self.info_field.setText(
+            'Edge weight:  \t%.5g\n' % self.graph[i, j]
+            + 'Ollivier curvature:  \t%.5g\n' % self.params['ollivier'][i, j]
+            + 'Forman curvature:  \t%.5g\n' % self.params['forman'][i, j]
+        )
 
     def reset(self, hard=False):
         self.offset = np.array([0, 0], dtype=np.float32)
@@ -86,13 +103,17 @@ class GraphView(QWidget):
         self.graph = mat
         self.symmertic = (mat.T == mat).all().all()
         self.vertex_count = self.graph.shape[0]
-        pos = nx.spring_layout(nx.from_numpy_matrix(self.graph))
+        pos = nx.spring_layout(
+            nx.from_numpy_array(self.graph),
+            k=np.sqrt(np.sqrt(rc.connected_components(self.graph))/self.vertex_count)
+        )
         self.coords = np.array(list(pos.values()), dtype=np.float32) * self.graph_convert_scale
         self.reset(True)
         self.repaint()
 
     def set_params(self, **kwargs):
         self.params = kwargs
+        self.repaint()
 
     def change_param(self, key: Union[int, str]):
         self.curr_param = key
@@ -114,10 +135,28 @@ class GraphView(QWidget):
                 a0.localPos().y() - self.height() / 2
             ])
             self.mouse = MouseState.down_idle
-            for i, v in enumerate(self.coords):
+            for i in range(self.vertex_count):
                 if self._inside_v(i, self.mouse_pos):
                     self.mouse = MouseState.move_vertex
                     self.moved_vertex = i
+                    return
+
+            closest_len2 = float('inf')
+            closest_edge = (1, 1)
+            for i in range(self.vertex_count):
+                for j in range(self.vertex_count):
+                    if i == j:
+                        continue
+                    if self.graph[i, j] != 0:
+                        if (curr_dist := self._distance_to_e2(i, j, self.mouse_pos)) < closest_len2:
+                            closest_len2 = curr_dist
+                            closest_edge = (i, j)
+            if closest_len2 <= self.edge_detection_threshold_absolute:
+                self.highlighted_edge = closest_edge
+            else:
+                self.highlighted_edge = None
+            self.update_info()
+            self.repaint()
 
     def mouseMoveEvent(self, a0: QMouseEvent) -> None:
         pos = np.array([
@@ -159,16 +198,34 @@ class GraphView(QWidget):
         for i in range(len(self.coords)):
             self._draw_vertex(painter, i)
 
-    def _v_center(self, i: int):
+    def _v_center(self, i: int) -> np.ndarray:
         return self.scale * (self.coords[i] + self.v_offsets[i]) + self.offset
 
-    def _calc_coord(self, i: int):
+    def _calc_coord(self, i: int) -> QPointF:
         return QPointF(*self._v_center(i))
 
-    def _inside_v(self, vertex_i: int, other: np.ndarray):
+    def _inside_v(self, vertex_i: int, other: np.ndarray) -> bool:
         vertex = self._v_center(vertex_i)
         dist2 = ((vertex - other)**2).sum()
         return dist2 < (self.vertex_radius * self.scale)**2
+
+    @staticmethod
+    def _dist_to_segment2(a: np.ndarray, b: np.ndarray, p: np.ndarray) -> float:
+        def d2(x, y):
+            return ((x - y)**2).sum()
+        e_len2 = d2(a, b)
+        if e_len2 == 0:
+            return d2(a, p)
+        t = min(1, max(0, np.dot(p - a, b - a) / e_len2))
+        proj = a + t * (b - a)
+        return d2(proj, p)
+
+    def _distance_to_e2(self, i: int, j: int, other: np.ndarray) -> float:
+        if self.symmertic:
+            return self._dist_to_segment2(self._v_center(i), self._v_center(j), other)
+        else:
+            # TODO offset by 1/2 self.orient_edge_control_offset
+            pass
 
     def _draw_vertex(self, painter: QPainter, i: int):
         painter.drawEllipse(
@@ -191,6 +248,9 @@ class GraphView(QWidget):
             else:
                 norm_param = (norm_param - n_min) / n_delta
 
+        if self.highlighted_edge is not None:
+            self._highlight_edge(painter)
+
         for i in range(self.vertex_count):
             for j in range(i+1, self.vertex_count):
                 if self.symmertic:
@@ -198,6 +258,12 @@ class GraphView(QWidget):
                 else:
                     self._draw_edge_ori(painter, i, j, mode, norm_param[i, j])
                     self._draw_edge_ori(painter, j, i, mode, norm_param[j, i])
+
+    def _highlight_edge(self, painter: QPainter):
+        if self.symmertic:
+            self._draw_edge_sym(painter, *self.highlighted_edge, -2, 0)
+        else:
+            self._draw_edge_ori(painter, *self.highlighted_edge, -2, 0)
 
     def _draw_edge_sym(self, painter: QPainter, i: int, j: int, mode: int, coef: float):
         if self.graph[i, j] == 0:
@@ -272,6 +338,8 @@ class GraphView(QWidget):
         elif mode == -1:
             curr_col = self._get_edge_color(coef)
             painter.setPen(QPen(curr_col, self.scale * self.edge_size))
+        elif mode == -2:
+            painter.setPen(QPen(self.highlight_color, self.scale * (self.edge_size*self.highlight_mul)))
 
 
 class MainWindow(QMainWindow):
@@ -288,6 +356,7 @@ class MainWindow(QMainWindow):
         self.vt_forman_rb = QRadioButton(self)
         self.refresh_button = QPushButton(self)
         self.new_graph_button = QPushButton(self)
+        self.open_graph_button = QPushButton(self)
 
         self.graph = None
 
@@ -305,6 +374,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.click_info)
         right_layout.addWidget(self.view_type_box)
         right_layout.addWidget(self.refresh_button)
+        right_layout.addWidget(self.open_graph_button)
         right_layout.addWidget(self.new_graph_button)
 
         main_layout = QHBoxLayout(self)
@@ -343,7 +413,9 @@ class MainWindow(QMainWindow):
     def _init_buttons(self):
         self.refresh_button.setText('Reset view')
         self.refresh_button.clicked.connect(self.reset_handler)
-        self.new_graph_button.setText('New graph')
+        self.open_graph_button.setText('Open graph...')
+        self.open_graph_button.clicked.connect(self.open_graph)
+        self.new_graph_button.setText('Random graph')
         self.new_graph_button.clicked.connect(self.random_graph)
 
     def set_default_view(self):
@@ -361,14 +433,26 @@ class MainWindow(QMainWindow):
     def reset_handler(self):
         self.view.reset()
 
+    def open_graph(self):
+        path = QFileDialog.getOpenFileName(
+            self, 'Open graph', '',
+            'NumPy pickled graphs (*.npy *.npz)'
+        )
+        if path[0] != '':
+            print(path[0])
+            graph = np.load(path[0])
+            self._set_new_graph(graph)
+
     def random_graph(self):
-        self.graph = nx.random_geometric_graph(50, 0.125)
-        ollivier(self.graph)
-        forman(self.graph)
-        self.view.set_graph(nx.adjacency_matrix(self.graph).toarray())
+        graph = nx.to_numpy_array(nx.random_geometric_graph(116, 0.1), dtype=float)
+        self._set_new_graph(graph)
+
+    def _set_new_graph(self, graph):
+        self.graph = graph
+        self.view.set_graph(self.graph)
         self.view.set_params(
-            ollivier=nx.adjacency_matrix(self.graph, weight='ollivier').toarray(),
-            forman=nx.adjacency_matrix(self.graph, weight='forman').toarray(),
+            ollivier=np.array(rc.calculate_ollivier(self.graph, 0.)),
+            forman=np.array(rc.calculate_forman(self.graph))
         )
 
 
