@@ -1,0 +1,4 @@
+git+https://github.com/eaoresh/curvature.git#egg=ricci_calculator&subdirectory=pybind11_module
+numpy
+pyqt5
+networkx
